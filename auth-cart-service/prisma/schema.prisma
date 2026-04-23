@@ -7,11 +7,80 @@ datasource db {
   url      = "file:./dev.db"
 }
 
+
+model Cart {
+  id        Int        @id @default(autoincrement())
+  
+  // Un panier appartient SOIT à un utilisateur connecté, SOIT à une session anonyme
+  userId    Int?       @unique // Le "?" veut dire que c'est optionnel
+  sessionId String?    @unique // La nouvelle clé pour les invités (ex: "abc-123")
+  
+  user      User?      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items     CartItem[]
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+}
+
+model CartItem {
+  id        Int      @id @default(autoincrement())
+  cartId    Int
+  cart      Cart     @relation(fields: [cartId], references: [id], onDelete: Cascade)
+  productId Int      // L'ID du produit (qui vient de ton Mock/Catalogue)
+  quantity  Int      @default(1)
+
+  // Très important pour ta fonction updateQuantity !
+  @@unique([cartId, productId]) 
+}
+
 model User {
-  id           Int      @id @default(autoincrement())
-  fullName     String
-  email        String   @unique
-  passwordHash String
-  createdAt    DateTime @default(now())
-  isEmailConfirmed Boolean         @default(false)
+  id               Int       @id @default(autoincrement())
+  fullName         String
+  email            String    @unique
+  passwordHash     String
+  createdAt        DateTime  @default(now())
+  isEmailConfirmed Boolean   @default(false)
+  cart             Cart?    
+  addresses        Address[] // Un utilisateur peut avoir plusieurs adresses
+  orders           Order[]   // Un utilisateur peut avoir plusieurs commandes
+}
+
+// 1. Table des Adresses
+model Address {
+  id          Int      @id @default(autoincrement())
+  userId      Int?     // <-- Le '?' le rend optionnel
+  user        User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sessionId   String?  // <-- On ajoute le badge d'invité
+  firstName   String
+  lastName    String
+  street      String
+  city        String
+  zipCode     String
+  country     String
+  phone       String
+  orders      Order[]
+}
+
+model Order {
+  id            Int         @id @default(autoincrement())
+  userId        Int?        // Optionnel maintenant
+  user          User?       @relation(fields: [userId], references: [id])
+  guestEmail    String?    
+  sessionId     String?     // Pour les invités
+  addressId     Int
+  address       Address     @relation(fields: [addressId], references: [id])
+  totalAmount   Float
+  status        String      @default("PENDING")
+  createdAt     DateTime    @default(now())
+  items         OrderItem[]
+}
+
+// 3. Table des Articles de la Commande (Le "Détail")
+model OrderItem {
+  id        Int     @id @default(autoincrement())
+  orderId   Int
+  order     Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId Int
+  name      String
+  price     Float
+  quantity  Int
 }

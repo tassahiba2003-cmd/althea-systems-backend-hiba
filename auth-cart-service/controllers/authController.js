@@ -78,22 +78,21 @@ exports.verifyEmail = async (req, res) => {
 // --- 3. LA CONNEXION (Version finale avec "Se souvenir de moi") ---
 exports.login = async (req, res) => {
     try {
-        // On récupère email, password et l'option rememberMe envoyée par le front-end 
         const { email, password, rememberMe } = req.body;
+        // On récupère le sessionId depuis les headers pour la fusion
+        const sessionId = req.headers['x-session-id'];
 
-        // 1. Vérification de la présence des champs obligatoires
         if (!email || !password) {
             return res.status(400).json({ message: "Email et mot de passe requis." });
         }
 
-        // 2. Recherche de l'utilisateur dans la base de données
+        // 1. Recherche de l'utilisateur
         const user = await prisma.user.findUnique({ where: { email } });
         if (!user) {
             return res.status(401).json({ message: "Identifiants incorrects." });
         }
 
-        // 3. Comparaison sécurisée du mot de passe avec Bcrypt
-   // 3. Comparaison sécurisée du mot de passe avec Bcrypt
+        // 2. Vérification du mot de passe
         const isPasswordValid = await bcrypt.compare(password, user.passwordHash);
         if (!isPasswordValid) {
             return res.status(401).json({ 
@@ -103,27 +102,82 @@ exports.login = async (req, res) => {
             });
         }
 
-        // 4. Vérification de la confirmation du compte (Section XI du cahier des charges) 
+        // 3. Vérification de l'email (Commenté pour tes tests si nécessaire)
         if (!user.isEmailConfirmed) {
             return res.status(403).json({ 
-                message: "Compte non confirmé. Vérifiez vos e-mails pour valider votre compte ou contactez le support client à support@althea.com." 
+                message: "Compte non confirmé. Vérifiez vos e-mails." 
             });
         }
 
-        // 5. Gestion de la durée de session "Se souvenir de moi" (Section XI.4) 
-        // Si l'utilisateur a coché la case, le token dure 30 jours, sinon 24 heures.
-        const tokenExpiration = rememberMe ? '30d' : '24h';
+        // --- 4. LOGIQUE DE FUSION (GUEST -> USER) ---
+        if (sessionId) {
+            try {
+                // A. FUSION DES ADRESSES (Simple mise à jour)
+                await prisma.address.updateMany({
+                    where: { sessionId: sessionId },
+                    data: { 
+                        userId: user.id, 
+                        sessionId: null 
+                    }
+                });
 
-        // 6. Génération du Token JWT
+                // B. FUSION DU PANIER (Plus complexe)
+                const guestCart = await prisma.cart.findUnique({
+                    where: { sessionId: sessionId },
+                    include: { items: true }
+                });
+
+                if (guestCart && guestCart.items.length > 0) {
+                    let userCart = await prisma.cart.findUnique({
+                        where: { userId: user.id },
+                        include: { items: true }
+                    });
+
+                    if (!userCart) {
+                        // L'utilisateur n'a pas de panier, on lui donne celui de l'invité
+                        await prisma.cart.update({
+                            where: { id: guestCart.id },
+                            data: { userId: user.id, sessionId: null }
+                        });
+                    } else {
+                        // Fusion article par article
+                        for (const guestItem of guestCart.items) {
+                            const existingItem = userCart.items.find(i => i.productId === guestItem.productId);
+                            
+                            if (existingItem) {
+                                await prisma.cartItem.update({
+                                    where: { id: existingItem.id },
+                                    data: { quantity: existingItem.quantity + guestItem.quantity }
+                                });
+                                await prisma.cartItem.delete({ where: { id: guestItem.id } });
+                            } else {
+                                await prisma.cartItem.update({
+                                    where: { id: guestItem.id },
+                                    data: { cartId: userCart.id }
+                                });
+                            }
+                        }
+                        // Supprimer le panier invité devenu vide
+                        await prisma.cart.delete({ where: { id: guestCart.id } });
+                    }
+                }
+            } catch (mergeError) {
+                console.error("⚠️ Erreur lors de la fusion (Panier/Adresses) :", mergeError);
+                // On ne bloque pas le login si la fusion échoue
+            }
+        }
+
+        // 5. Génération du Token
+        const tokenExpiration = rememberMe ? '30d' : '24h';
         const token = jwt.sign(
             { userId: user.id, email: user.email },
             process.env.JWT_SECRET,
             { expiresIn: tokenExpiration }
         );
 
-        // 7. Envoi de la réponse de succès
+        // 6. Réponse finale
         res.status(200).json({
-            message: "Connexion réussie !",
+            message: "Connexion réussie ! Vos données ont été synchronisées.",
             token: token,
             user: { 
                 id: user.id, 
@@ -137,6 +191,10 @@ exports.login = async (req, res) => {
         res.status(500).json({ message: "Erreur serveur lors de la connexion." });
     }
 };
+
+
+
+
 // --- 4. MOT DE PASSE OUBLIÉ ---
 exports.forgotPassword = async (req, res) => {
     try {
