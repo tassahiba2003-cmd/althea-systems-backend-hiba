@@ -79,15 +79,18 @@ exports.verifyEmail = async (req, res) => {
 exports.login = async (req, res) => {
     try {
         const { email, password, rememberMe } = req.body;
-        // On récupère le sessionId depuis les headers pour la fusion
+        // On récupère le sessionId depuis les headers
         const sessionId = req.headers['x-session-id'];
 
         if (!email || !password) {
             return res.status(400).json({ message: "Email et mot de passe requis." });
         }
 
+        // --- SÉCURITÉ : Nettoyage de l'email (Faille n°3 Deep Audit) ---
+        const emailClean = email.toLowerCase().trim();
+
         // 1. Recherche de l'utilisateur
-        const user = await prisma.user.findUnique({ where: { email } });
+        const user = await prisma.user.findUnique({ where: { email: emailClean } });
         if (!user) {
             return res.status(401).json({ message: "Identifiants incorrects." });
         }
@@ -102,7 +105,7 @@ exports.login = async (req, res) => {
             });
         }
 
-        // 3. Vérification de l'email (Commenté pour tes tests si nécessaire)
+        // 3. Vérification de l'email
         if (!user.isEmailConfirmed) {
             return res.status(403).json({ 
                 message: "Compte non confirmé. Vérifiez vos e-mails." 
@@ -110,60 +113,69 @@ exports.login = async (req, res) => {
         }
 
         // --- 4. LOGIQUE DE FUSION (GUEST -> USER) ---
-        if (sessionId) {
+        // SÉCURITÉ : On vérifie que le sessionId n'est pas le texte "undefined" ou "null" (Faille n°2 Deep Audit)
+        if (sessionId && sessionId !== "undefined" && sessionId !== "null") {
             try {
-                // A. FUSION DES ADRESSES (Simple mise à jour)
-                await prisma.address.updateMany({
-                    where: { sessionId: sessionId },
-                    data: { 
-                        userId: user.id, 
-                        sessionId: null 
-                    }
-                });
+                // SÉCURITÉ : On utilise une TRANSACTION pour être sûr que tout passe ou rien (Faille n°1 Deep Audit)
+                await prisma.$transaction(async (tx) => {
+                    
+                    // A. FUSION DES ADRESSES
+                    await tx.address.updateMany({
+                        where: { sessionId: sessionId },
+                        data: { userId: user.id, sessionId: null }
+                    });
 
-                // B. FUSION DU PANIER (Plus complexe)
-                const guestCart = await prisma.cart.findUnique({
-                    where: { sessionId: sessionId },
-                    include: { items: true }
-                });
+                    // B. CORRECTIF : FUSION DES COMMANDES (Ghost Orders)
+                    await tx.order.updateMany({
+                        where: { sessionId: sessionId },
+                        data: { userId: user.id, sessionId: null }
+                    });
 
-                if (guestCart && guestCart.items.length > 0) {
-                    let userCart = await prisma.cart.findUnique({
-                        where: { userId: user.id },
+                    // C. FUSION DU PANIER
+                    const guestCart = await tx.cart.findUnique({
+                        where: { sessionId: sessionId },
                         include: { items: true }
                     });
 
-                    if (!userCart) {
-                        // L'utilisateur n'a pas de panier, on lui donne celui de l'invité
-                        await prisma.cart.update({
-                            where: { id: guestCart.id },
-                            data: { userId: user.id, sessionId: null }
+                    if (guestCart && guestCart.items.length > 0) {
+                        let userCart = await tx.cart.findUnique({
+                            where: { userId: user.id },
+                            include: { items: true }
                         });
-                    } else {
-                        // Fusion article par article
-                        for (const guestItem of guestCart.items) {
-                            const existingItem = userCart.items.find(i => i.productId === guestItem.productId);
-                            
-                            if (existingItem) {
-                                await prisma.cartItem.update({
-                                    where: { id: existingItem.id },
-                                    data: { quantity: existingItem.quantity + guestItem.quantity }
-                                });
-                                await prisma.cartItem.delete({ where: { id: guestItem.id } });
-                            } else {
-                                await prisma.cartItem.update({
-                                    where: { id: guestItem.id },
-                                    data: { cartId: userCart.id }
-                                });
+
+                        if (!userCart) {
+                            // Si l'user n'a pas de panier, on lui donne celui de l'invité
+                            await tx.cart.update({
+                                where: { id: guestCart.id },
+                                data: { userId: user.id, sessionId: null }
+                            });
+                        } else {
+                            // Sinon fusion article par article
+                            for (const guestItem of guestCart.items) {
+                                const existingItem = userCart.items.find(i => i.productId === guestItem.productId);
+                                
+                                if (existingItem) {
+                                    await tx.cartItem.update({
+                                        where: { id: existingItem.id },
+                                        data: { quantity: existingItem.quantity + guestItem.quantity }
+                                    });
+                                    await tx.cartItem.delete({ where: { id: guestItem.id } });
+                                } else {
+                                    await tx.cartItem.update({
+                                        where: { id: guestItem.id },
+                                        data: { cartId: userCart.id }
+                                    });
+                                }
                             }
+                            // Supprimer le panier invité vide
+                            await tx.cart.delete({ where: { id: guestCart.id } });
                         }
-                        // Supprimer le panier invité devenu vide
-                        await prisma.cart.delete({ where: { id: guestCart.id } });
                     }
-                }
+                });
+                console.log(`✅ Fusion réussie pour l'utilisateur ${user.id}`);
             } catch (mergeError) {
-                console.error("⚠️ Erreur lors de la fusion (Panier/Adresses) :", mergeError);
-                // On ne bloque pas le login si la fusion échoue
+                console.error("⚠️ Erreur lors de la fusion sécurisée :", mergeError);
+                // On continue le login même si la fusion échoue pour ne pas bloquer l'user
             }
         }
 
@@ -191,9 +203,6 @@ exports.login = async (req, res) => {
         res.status(500).json({ message: "Erreur serveur lors de la connexion." });
     }
 };
-
-
-
 
 // --- 4. MOT DE PASSE OUBLIÉ ---
 exports.forgotPassword = async (req, res) => {
@@ -225,5 +234,96 @@ exports.forgotPassword = async (req, res) => {
 
     } catch (error) {
         res.status(500).json({ message: "Erreur lors de la demande de réinitialisation." });
+    }
+};
+
+
+// --- 5. RÉINITIALISATION RÉELLE DU MOT DE PASSE ---
+exports.resetPassword = async (req, res) => {
+    try {
+        const { token } = req.params; // On récupère le token dans l'URL
+        const { password } = req.body; // On récupère le nouveau mot de passe
+
+        if (!password) {
+            return res.status(400).json({ message: "Le nouveau mot de passe est obligatoire." });
+        }
+
+        // A. Vérification de la force du mot de passe
+        const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/;
+        if (!passwordRegex.test(password)) {
+            return res.status(400).json({ 
+                message: "Le mot de passe doit contenir au moins 8 caractères, une majuscule, une minuscule, un chiffre et un caractère spécial." 
+            });
+        }
+
+        // B. Vérifier si le token est valide et non expiré
+        // jwt.verify lèvera une erreur si le token a plus d'une heure ou est corrompu
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+        // C. Hasher le nouveau mot de passe
+        const salt = await bcrypt.genSalt(10);
+        const passwordHash = await bcrypt.hash(password, salt);
+
+        // D. Mise à jour dans la base de données via Prisma
+        await prisma.user.update({
+            where: { id: decoded.userId },
+            data: { passwordHash: passwordHash }
+        });
+
+        res.status(200).json({ message: "Votre mot de passe a été modifié avec succès. Vous pouvez maintenant vous connecter." });
+
+    } catch (error) {
+        console.error("Erreur Reset Password:", error.message);
+        // Si le token est expiré, jwt.verify envoie une erreur ici
+        res.status(401).json({ message: "Le lien de réinitialisation est invalide ou a expiré." });
+    }
+};
+
+
+// --- 6. RENVOYER LE LIEN DE CONFIRMATION ---
+exports.resendConfirmation = async (req, res) => {
+    try {
+        const { email } = req.body;
+
+        if (!email) {
+            return res.status(400).json({ message: "L'adresse e-mail est requise." });
+        }
+
+        // Nettoyage de l'e-mail
+        const emailClean = email.toLowerCase().trim();
+
+        // 1. Chercher l'utilisateur
+        const user = await prisma.user.findUnique({ where: { email: emailClean } });
+
+        // 2. Vérifications selon ton cahier des charges (être précis sur l'erreur)
+        if (!user) {
+            return res.status(404).json({ message: "Aucun compte n'est associé à cette adresse e-mail." });
+        }
+
+        if (user.isEmailConfirmed) {
+            return res.status(400).json({ message: "Ce compte est déjà confirmé. Vous pouvez vous connecter." });
+        }
+
+        // 3. Générer un nouveau token (Valide 24h)
+        const validationToken = jwt.sign(
+            { userId: user.id }, 
+            process.env.JWT_SECRET, 
+            { expiresIn: '24h' }
+        );
+        const confirmationLink = `http://localhost:3000/api/auth/verify-email/${validationToken}`;
+
+        // 4. Simulation d'envoi d'e-mail (console.log)
+        console.log("\n=========================================");
+        console.log("📧 RENVOI DU LIEN DE CONFIRMATION À :", user.email);
+        console.log("Nouveau lien :", confirmationLink);
+        console.log("=========================================\n");
+
+        res.status(200).json({
+            message: "Un nouveau lien de confirmation a été envoyé à votre adresse e-mail.",
+        });
+
+    } catch (error) {
+        console.error("🚨 ERREUR RENVOI CONFIRMATION :", error);
+        res.status(500).json({ message: "Erreur serveur lors du renvoi de l'e-mail." });
     }
 };
