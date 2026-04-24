@@ -1,0 +1,37 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./support.db" // Base de données isolée pour ce microservice
+}
+
+// 1. Table pour le Formulaire de contact classique
+model ContactMessage {
+  id        Int      @id @default(autoincrement())
+  email     String
+  subject   String
+  message   String
+  status    String   @default("NEW") // Statuts: NEW, IN_PROGRESS, RESOLVED (pour le backoffice)
+  createdAt DateTime @default(now())
+}
+
+// 2. Table pour les sessions de Chatbot
+model ChatSession {
+  id        Int           @id @default(autoincrement())
+  userEmail String?       // Peut être vide si l'utilisateur est anonyme
+  status    String        @default("BOT") // Statuts: BOT, ESCALATED, RESOLVED
+  createdAt DateTime      @default(now())
+  messages  ChatMessage[]
+}
+
+// 3. Table pour l'historique des messages du Chatbot
+model ChatMessage {
+  id        Int         @id @default(autoincrement())
+  sessionId Int
+  session   ChatSession @relation(fields: [sessionId], references: [id])
+  sender    String      // "USER" ou "BOT"
+  text      String
+  createdAt DateTime    @default(now())
+}
