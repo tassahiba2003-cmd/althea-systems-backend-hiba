@@ -22,7 +22,7 @@
     "express-rate-limit": "^8.4.0",
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.3",
-    "nodemailer": "^8.0.5",
+    "nodemailer": "^8.0.7",
     "stripe": "^22.0.2",
     "ws": "^8.20.0"
   },
