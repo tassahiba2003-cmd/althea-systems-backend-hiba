@@ -1,5 +1,11 @@
 const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+
+const { PrismaClient } = require('@prisma/client');
+
+// On dit au code de lire le chemin du fichier dans le .env
+const prisma = new PrismaClient({
+    datasourceUrl: process.env.DATABASE_URL
+});
 
 // ==============================================================
 // 1. FORMULAIRE CLASSIQUE (Chapitre XIV - Point 1 & 2)
